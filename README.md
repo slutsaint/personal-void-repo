@@ -1,6 +1,6 @@
 # My XBPS repo
 
-My personal Void Linux package rep, packages are built and updated automatically
+My personal Void Linux package repo, packages are built and updated automatically
 
 ## Add it
 ```sh

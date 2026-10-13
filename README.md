@@ -1,12 +1,11 @@
 # My XBPS repo
 
-Auto-updating, auto-building Void Linux repo, hosted free on GitHub.
-Based on HeavenDivided/void-repo (MIT). See LICENSE.
+My personal Void Linux package rep, packages are built and updated automatically
 
-## Use it (users)
+## Add it
 ```sh
 echo "repository=https://github.com/OWNER/REPO/releases/download/repo" | sudo tee /etc/xbps.d/10-mine.conf
-sudo xbps-install -S     # confirm the key fingerprint when asked
+sudo xbps-install -S    
 ```
 
 ## Packages

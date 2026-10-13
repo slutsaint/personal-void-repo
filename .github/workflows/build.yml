@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['pkgs/**', 'common/**', 'builder.sh', '.github/workflows/build.yml']
+    paths: ['pkgs/**', 'common/**', 'builder', 'sign', '.github/workflows/build.yml']
 
 permissions:
   contents: write
@@ -17,17 +17,17 @@ env:
   PKGS_DIR: ./pkgs
   REPO_DIR: ./repo
   EXTRA_ARGS: -C
-  SIGNED_BY: "slut saint <manthan2007matrick@gmail.com>"   # shown when users import your key
-  RELEASE_TAG: repo           # packages are hosted as assets of this release
+  SIGNED_BY: "slut saint <manthan2007matrick@gmail.com>"
+  RELEASE_TAG: repo
   GH_TOKEN: ${{ github.token }}
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
-      options: --privileged   # xbps-src needs namespaces; drop this if your first run shows it's not needed
+      options: --privileged
     steps:
       - name: install tools
         run: |
@@ -56,6 +56,13 @@ jobs:
       - name: lint templates
         if: env.TO_BUILD != ''
         run: for p in $TO_BUILD; do xlint pkgs/$p/template; done
+
+      - name: allow user namespaces (xbps-src sandbox needs them)
+        run: |
+          echo "before: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1)"
+          echo 0 > /proc/sys/kernel/apparmor_restrict_unprivileged_userns || echo "could not change it"
+          echo "after: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1)"
+          echo "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>&1)"
 
       - name: build (as non-root, signing key NOT available)
         if: env.TO_BUILD != ''

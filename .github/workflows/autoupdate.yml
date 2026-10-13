@@ -17,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: keep schedule alive (resets the 60-day timer)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: if [ "$(date +%u-%H)" = "1-03" ]; then gh workflow enable autoupdate.yml; fi
       - name: install tools
         run: sudo apt-get update && sudo apt-get install -y fish jq
       - name: check upstream for new versions

@@ -1,11 +1,11 @@
-# My xbps repo
+# Personal Void Repo
 
 My personal Void Linux package repo, packages are built and updated automatically
 
 ## Add it
 ```sh
-echo "repository=https://github.com/OWNER/REPO/releases/download/repo" | sudo tee /etc/xbps.d/10-mine.conf
-sudo xbps-install -S    
+echo "repository=https://github.com/slutsaint/personal-void-repo/releases/download/repo" | sudo tee /etc/xbps.d/10-mine.conf
+sudo xbps-install -S
 ```
 
 ## Packages

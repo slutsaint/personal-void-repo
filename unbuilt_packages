@@ -1,0 +1,85 @@
+#!/bin/sh -e
+#
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 Wladimir Bec
+# Copyright (C) 2026 Haris
+# Copyright (C) 2026 vectrex980
+#
+
+: "${PKGS_DIR:=./pkgs}"
+: "${REPO_DIR:=./repo}"
+: "${ARCHS:=x86_64 x86_64-musl}"
+NL="
+"
+
+case "$1" in -h*|--h*|h*)
+    cat <<EOF
+$0
+
+    Helper to find unbuilt packages from specified directories.
+    The list of packages to build will be printed to STDOUT with
+    the following format:
+
+    arch:name:version:revision
+
+Environment Variables:
+    PKGS_DIR            Path to the custom packages repo ($PKGS_DIR)
+    REPO_DIR            Where to place the resulting binaries ($REPO_DIR)
+    ARCHS               Space separated list of archs to build for ($ARCHS)
+
+EOF
+    exit 0
+esac
+
+[ -t 1 ] && {
+    printf "\033[0;33mwarn\033[0m: disabling STDOUT output, please pipe or redirect STDOUT to enable it\n"
+}
+
+temp="$(mktemp)"
+trap 'rm -f $temp' EXIT
+
+list="Package:Version:Revision:Arch:File:Status$NL"
+for pkg in "$PKGS_DIR"/*; do
+    [ -f "$pkg/template" ] || continue
+
+    # some templates don't specifies archs so let's reset it
+    archs="*"
+    grep \
+        -e "^pkgname=" \
+        -e "^version=" \
+        -e "^revision=" \
+        -e "^archs=" \
+        "$pkg/template" > "$temp"
+
+    # shellcheck source=/dev/null
+    . "$temp"
+    
+    for arch in $ARCHS; do
+        matched=0
+        set -f
+        for _arch in $archs; do
+            set +f
+            # shellcheck disable=2254
+            case "$arch" in ${_arch#\~}) 
+                [ -n "${_arch##\~*}" ] && matched=1
+                break
+            esac
+        done
+
+        # shellcheck disable=2154
+        file="${pkgname}-${version}_${revision}.${arch}.xbps"
+        line="$pkgname:$version:$revision:$arch:$file"
+        if [ "$matched" != 1 ]; then
+            line="$line:\033[0;31mincompatible arch\033[0m"
+        elif [ ! -f "$REPO_DIR/binpkgs/$file" ]; then
+            line="$line:\033[0;33mnot built\033[0m"
+            [ -t 1 ] || echo "$arch:$pkgname:$version:$revision"
+        else
+            line="$line:\033[032malready built\033[0m"
+        fi
+
+        list="$list$NL$line"
+    done
+done
+
+echo "$list" | column -s":" -t >&2

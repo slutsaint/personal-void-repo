@@ -1,0 +1,34 @@
+#!/bin/sh -e
+#
+# Signing + indexing half of HeavenDivided/void-builder's 'builder' (Copyright (C) 2026 Wladimir Bec),
+# split out so it can run AFTER the build. Check that repo's LICENSE before publishing.
+#
+: "${REPO_DIR:=./repo}"
+info() { printf "\033[0;32minfo\033[0m: %s\n" "$*"; }
+error() { printf "\033[0;31merror\033[0m: %s\n" "$*" >&2; }
+[ -z "$SIGN_KEY" ] && { error "SIGN_KEY environment variable required"; exit 1; }
+
+binpkgs="$REPO_DIR/binpkgs"
+info "Signing packages..."
+for pkg in "$binpkgs"/*.xbps; do
+    info "Signing ${pkg##"$binpkgs/"}..."
+    xbps-rindex --privkey "$SIGN_KEY" --signedby "$SIGNED_BY" --sign-pkg "$pkg"
+done
+
+# shellcheck disable=2086
+# we need words splitting
+repodatas="$(ls $binpkgs/*-repodata 2>/dev/null || :)"
+if [ -n "$repodatas" ]; then
+    for repodata in $repodatas; do
+        arch="${repodata##"$binpkgs/"}"
+        arch="${arch%%-repodata}"
+        info "Cleaning $binpkgs for $arch..."
+        XBPS_TARGET_ARCH="$arch" xbps-rindex --force -cC -v "$binpkgs"
+    done
+fi
+
+info "Reindexing $binpkgs..."
+xbps-rindex --force -a -v "$binpkgs"/*.xbps
+
+info "Signing $binpkgs..."
+xbps-rindex --privkey "$SIGN_KEY" --signedby "$SIGNED_BY" --sign "$binpkgs"

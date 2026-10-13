@@ -1,0 +1,35 @@
+# Template file for 'noctalia'
+pkgname=noctalia
+version=5.2.1
+revision=1
+build_style=meson
+build_helper=qemu
+hostmakedepends="pkg-config wayland-devel"
+makedepends="basu-devel cairo-devel fontconfig-devel freetype-devel harfbuzz-devel
+	jemalloc-devel json-c++ libcurl-devel libepoxy-devel libglvnd-devel libmd4c-devel
+	libqalculate-devel librsvg-devel libsodium-devel libwebp-devel libxkbcommon-devel
+	libxml2-devel libsecret-devel libjxl-devel MesaLib-devel pam-devel pango-devel
+	libsndfile-devel pipewire-devel polkit-devel sdbus-c++-devel stb tomlplusplus-devel
+	libical-devel wayland-devel wayland-protocols wireplumber-devel"
+depends="git"
+short_desc="Sleek, customizable desktop shell crafted for Wayland"
+maintainer="slut saint <manthan2007matrick@gmail.com>"
+license="MIT"
+homepage="https://docs.noctalia.dev/noctalia/"
+changelog="https://github.com/noctalia-dev/noctalia/releases/tag/v${version}"
+distfiles="https://github.com/noctalia-dev/noctalia/archive/refs/tags/v${version}.tar.gz"
+checksum="5418f6b759de96e56a4bbca809c5a4c60a8a9594bdf67ecb8c5a341f97c221d1"
+
+# Tests appear to be not reliable in a sandboxed build
+# Expected fixes in next few releases
+make_check=no
+
+post_install() {
+	vlicense LICENSE
+	vsconf example.toml
+
+	for shell in bash fish zsh; do
+		vtargetrun ${DESTDIR}/usr/bin/noctalia completions ${shell} > noctalia.${shell}
+		vcompletion noctalia.${shell} ${shell}
+	done
+}

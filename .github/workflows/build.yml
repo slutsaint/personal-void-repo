@@ -1,0 +1,85 @@
+name: build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['pkgs/**', 'common/**', 'builder.sh', '.github/workflows/build.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  ARCHS: x86_64
+  PKGS_DIR: ./pkgs
+  REPO_DIR: ./repo
+  EXTRA_ARGS: -C
+  SIGNED_BY: "slut saint <manthan2007matrick@gmail.com>"   # shown when users import your key
+  RELEASE_TAG: repo           # packages are hosted as assets of this release
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: ghcr.io/void-linux/void-glibc-full:latest
+      options: --privileged   # xbps-src needs namespaces; drop this if your first run shows it's not needed
+    steps:
+      - name: install tools
+        run: |
+          xbps-install -Syu || xbps-install -Syu
+          xbps-install -Sy git curl bash xtools util-linux jq nodejs github-cli openssl xbps
+          useradd -M builder
+          git config --global --add safe.directory '*'
+
+      - uses: actions/checkout@v4
+
+      - name: prepare release and download already-built packages
+        run: |
+          mkdir -p repo/binpkgs
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --title "XBPS repo" --notes "Binary package repository. Do not download by hand."
+          gh release download "$RELEASE_TAG" --dir repo/binpkgs --clobber || echo "nothing published yet"
+
+      - name: find packages that are not built yet
+        run: |
+          ./unbuilt_packages > .list || true
+          cat .list
+          echo "TO_BUILD=$(cut -d: -f2 .list | sort -u | tr '\n' ' ')" >> "$GITHUB_ENV"
+          mkdir -p .to_build
+          for arch in $ARCHS; do grep "^$arch:" .list > .to_build/"$arch" || :; done
+
+      - name: lint templates
+        if: env.TO_BUILD != ''
+        run: for p in $TO_BUILD; do xlint pkgs/$p/template; done
+
+      - name: build (as non-root, signing key NOT available)
+        if: env.TO_BUILD != ''
+        run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          for f in .to_build/*; do
+            arch="${f##.to_build/}"
+            list="$(cut -d: -f2 "$f" | uniq | tr '\n' ' ')"
+            [ -z "$list" ] && continue
+            echo "building $arch packages: $list"
+            su builder -c "cd '$GITHUB_WORKSPACE' && yes | XBPS_TARGET_ARCH=$arch EXTRA_ARGS='$EXTRA_ARGS -j$(nproc) -m masterdir-$arch -A $arch' ./builder $list"
+          done
+
+      - name: sign and index
+        if: env.TO_BUILD != ''
+        env:
+          SIGN_KEY_B64: ${{ secrets.SIGN_KEY }}
+        run: |
+          echo -n "$SIGN_KEY_B64" | base64 -d > /tmp/key.pem
+          SIGN_KEY=/tmp/key.pem ./sign
+          rm -f /tmp/key.pem
+
+      - name: publish
+        if: env.TO_BUILD != ''
+        run: |
+          cd repo/binpkgs
+          gh release upload "$RELEASE_TAG" ./*.xbps ./*.sig2 ./*-repodata --clobber

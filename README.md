@@ -1,4 +1,4 @@
-# My XBPS repo
+# My xbps repo
 
 My personal Void Linux package repo, packages are built and updated automatically
 

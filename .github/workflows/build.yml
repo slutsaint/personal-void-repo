@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['pkgs/**', 'common/**', 'builder', 'sign', '.github/workflows/build.yml']
+    paths: ['pkgs/**', 'common/**', 'builder', 'sign', 'autobuild', '.github/workflows/build.yml']
 
 permissions:
   contents: write
@@ -44,6 +44,7 @@ jobs:
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
             gh release create "$RELEASE_TAG" --title "XBPS repo" --notes "Binary package repository. Do not download by hand."
           gh release download "$RELEASE_TAG" --dir repo/binpkgs --clobber || echo "nothing published yet"
+          rm -f repo/binpkgs/last-build.log
 
       - name: find packages that are not built yet
         run: |
@@ -66,18 +67,13 @@ jobs:
 
       - name: build (as non-root, signing key NOT available)
         if: env.TO_BUILD != ''
+        shell: bash
         run: |
           chown -R builder:builder "$GITHUB_WORKSPACE"
-          for f in .to_build/*; do
-            arch="${f##.to_build/}"
-            list="$(cut -d: -f2 "$f" | uniq | tr '\n' ' ')"
-            [ -z "$list" ] && continue
-            echo "building $arch packages: $list"
-            su builder -c "cd '$GITHUB_WORKSPACE' && yes | XBPS_TARGET_ARCH=$arch EXTRA_ARGS='$EXTRA_ARGS -j$(nproc) -m masterdir-$arch -A $arch' ./builder $list"
-          done
+          bash ./autobuild
 
       - name: sign and index
-        if: env.TO_BUILD != ''
+        if: env.BUILT_ANY == 'true'
         env:
           SIGN_KEY_B64: ${{ secrets.SIGN_KEY }}
         run: |
@@ -86,7 +82,34 @@ jobs:
           rm -f /tmp/key.pem
 
       - name: publish
-        if: env.TO_BUILD != ''
+        if: env.BUILT_ANY == 'true'
         run: |
           cd repo/binpkgs
           gh release upload "$RELEASE_TAG" ./*.xbps ./*.sig2 ./*-repodata --clobber
+
+      - name: record auto-fixed templates in the repo
+        if: env.AUTOFIXED == 'true'
+        continue-on-error: true
+        run: |
+          git config user.name "repo-bot"
+          git config user.email "repo-bot@users.noreply.github.com"
+          git add pkgs
+          git commit -m "[auto-fix] add missing makedepends" -m "$(cat .autofixed)"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: publish build report
+        if: always() && env.TO_BUILD != ''
+        continue-on-error: true
+        run: |
+          cp build-report.txt last-build.log
+          gh release upload "$RELEASE_TAG" last-build.log --clobber
+
+      - name: fail the run if any package could not be built
+        if: env.TO_BUILD != ''
+        run: |
+          if [ -s .failed ]; then
+            echo "These packages failed (details in last-build.log on the release):"
+            cat .failed
+            exit 1
+          fi

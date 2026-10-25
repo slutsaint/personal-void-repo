@@ -1,0 +1,206 @@
+#!/bin/bash
+#
+# autobuild - build packages one by one with two narrow, deterministic safety nets:
+#
+#   1. TEMPORARY NETWORK ERRORS -> rebuild (max 2 retries, no file changes).
+#   2. MESON "Dependency "X" not found" -> look up which Void package ships X.pc
+#      with xlocate. Only if EXACTLY ONE "-devel" package owns that file, add it
+#      to makedepends and rebuild (max 5 additions per package).
+#
+# Anything else fails cleanly: the template is restored, nothing is published
+# for that package, and the reason is written to the report (build-report.txt).
+#
+# Never touched: versions, checksums, depends, hostmakedepends, patches.
+#
+# Outputs (in the current directory):
+#   build-report.txt  human/AI-readable report of everything that happened
+#   .failed           one line per package that failed (empty/absent = all fine)
+#   .autofixed        one line per package whose template was changed
+# Sets in $GITHUB_ENV (if set): BUILT_ANY=true, AUTOFIXED=true
+#
+# Test hooks: BUILD_RUNNER="cmd" is called as: cmd <arch> <pkg>
+#             XLOCATE=cmd overrides the xlocate binary.
+
+: "${PKGS_DIR:=./pkgs}"
+: "${MAX_NET_RETRIES:=2}"
+: "${MAX_DEP_FIXES:=5}"
+: "${XLOCATE:=xlocate}"
+: "${REPORT:=build-report.txt}"
+: "${TO_BUILD_DIR:=.to_build}"
+ENVFILE="${GITHUB_ENV:-/dev/null}"
+
+ATTLOG="$(mktemp)"
+trap 'rm -f "$ATTLOG" "$ATTLOG.clean"' EXIT
+XLOCATE_SYNCED=0
+
+: > .failed
+: > .autofixed
+{
+    echo "autobuild report"
+    echo "date:   $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    [ -n "$GITHUB_SERVER_URL" ] && echo "run:    $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+    echo
+} > "$REPORT"
+
+say() { echo "autobuild: $*"; }
+rep() { echo "$*" >> "$REPORT"; }
+
+clean_log() { sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$ATTLOG" > "$ATTLOG.clean"; }
+
+run_build() { # arch pkg
+    if [ -n "$BUILD_RUNNER" ]; then
+        $BUILD_RUNNER "$1" "$2"
+    else
+        su builder -c "cd '$GITHUB_WORKSPACE' && yes | XBPS_TARGET_ARCH=$1 EXTRA_ARGS='$EXTRA_ARGS -j$(nproc) -m masterdir-$1 -A $1' ./builder $2"
+    fi
+}
+
+is_network_error() {
+    # a checksum problem is never "temporary": do not retry it
+    grep -qiE 'SHA256 hash is not valid|checksum' "$ATTLOG.clean" && return 1
+    grep -qiE 'could not resolve host|temporary failure in name resolution|connection timed out|connection reset|connection refused|network is unreachable|operation timed out|failed to connect|failed to download|failed to fetch|curl: \([0-9]+\)|http error 5[0-9][0-9]|unexpected eof' "$ATTLOG.clean"
+}
+
+# print the dependency name from a meson "not found" error, if there is one
+missing_pkgconfig_dep() {
+    grep -oE 'ERROR: Dependency "[^"]+" not found' "$ATTLOG.clean" | head -n1 | sed -E 's/.*Dependency "([^"]+)".*/\1/'
+}
+
+# sets LOOKUP_PKG to the single -devel package that ships <name>.pc and returns 0;
+# returns 1 if there are zero or several candidates (LOOKUP_CANDS lists them), 2 if xlocate is unusable.
+# NOTE: call it directly, not inside $(...), so the variables survive.
+lookup_devel_pkg() { # name
+    local name="$1" out cands n
+    LOOKUP_PKG=""; LOOKUP_CANDS=""
+    if [ "$XLOCATE_SYNCED" = 0 ]; then
+        "$XLOCATE" -S >/dev/null 2>&1 || { say "xlocate sync failed"; return 2; }
+        XLOCATE_SYNCED=1
+    fi
+    out="$("$XLOCATE" "/pkgconfig/${name}.pc" 2>/dev/null)" || true
+    cands="$(printf '%s\n' "$out" | awk -v n="${name}.pc" '
+        NF >= 2 {
+            path = ""
+            for (i = 2; i <= NF; i++) if (substr($i, 1, 1) == "/") { path = $i; break }
+            if (path ~ ("^/usr/(lib[0-9]*|share)/pkgconfig/" n "$")) print $1
+        }' | sed -E 's/-[^-]+_[0-9]+$//' | grep -E -- '-devel$' | sort -u)"
+    n="$(printf '%s\n' "$cands" | grep -c .)"
+    LOOKUP_CANDS="$(printf '%s' "$cands" | tr '\n' ' ')"
+    [ "$n" = 1 ] || return 1
+    LOOKUP_PKG="$cands"
+}
+
+build_pkg() { # arch pkg
+    local arch="$1" pkg="$2" tpl="$PKGS_DIR/$2/template"
+    local attempt=0 net_retries=0 dep_fixes=0 actions="" rc dep cand
+    local tried=" "
+    local orig; orig="$(mktemp)"
+    cp "$tpl" "$orig"
+
+    rep "=== $pkg ($arch) ==="
+    while :; do
+        attempt=$((attempt + 1))
+        say "building $pkg ($arch), attempt $attempt"
+        run_build "$arch" "$pkg" 2>&1 | tee "$ATTLOG"
+        rc="${PIPESTATUS[0]}"
+
+        if [ "$rc" = 0 ]; then
+            rep "result: BUILT after $attempt attempt(s)"
+            if ! cmp -s "$orig" "$tpl"; then
+                rep "template CHANGED by autobuild:"
+                rep "$(diff "$orig" "$tpl" | sed 's/^/    /')"
+                echo "$pkg:$actions" >> .autofixed
+            fi
+            [ -n "$actions" ] && rep "actions:$actions"
+            rep
+            rm -f "$orig"
+            echo "BUILT_ANY=true" >> "$ENVFILE"
+            [ -s .autofixed ] && echo "AUTOFIXED=true" >> "$ENVFILE"
+            return 0
+        fi
+
+        clean_log
+
+        # --- safety net 1: temporary network trouble -------------------------
+        if is_network_error && [ "$net_retries" -lt "$MAX_NET_RETRIES" ]; then
+            net_retries=$((net_retries + 1))
+            say "looks like a temporary network error, retry $net_retries/$MAX_NET_RETRIES"
+            actions="$actions [network-retry#$net_retries]"
+            sleep "${RETRY_SLEEP:-20}"
+            continue
+        fi
+
+        # --- safety net 2: meson missing pkg-config dependency ---------------
+        dep="$(missing_pkgconfig_dep)"
+        if [ -n "$dep" ]; then
+            reason=""
+            if ! printf '%s' "$dep" | grep -qE '^[A-Za-z0-9._+-]+$'; then
+                reason="dependency name looks unusual, not touching anything"
+            elif [ "$dep_fixes" -ge "$MAX_DEP_FIXES" ]; then
+                reason="already added $MAX_DEP_FIXES dependencies, giving up"
+            elif case "$tried" in *" $dep "*) true ;; *) false ;; esac; then
+                reason="'$dep' was already handled once and the error came back"
+            elif ! grep -q '^makedepends="' "$tpl"; then
+                reason="template has no makedepends=\" line to extend"
+            else
+                lookup_devel_pkg "$dep"
+                lrc=$?
+                cand="$LOOKUP_PKG"
+                if [ "$lrc" = 2 ]; then
+                    reason="could not sync the xlocate file database"
+                elif [ "$lrc" != 0 ]; then
+                    if [ -z "$LOOKUP_CANDS" ]; then
+                        reason="no -devel package in Void ships ${dep}.pc"
+                    else
+                        reason="more than one package could provide ${dep}.pc (${LOOKUP_CANDS}), not choosing for you"
+                    fi
+                elif ! printf '%s' "$cand" | grep -qE '^[A-Za-z0-9._+-]+-devel$'; then
+                    reason="lookup returned an unexpected package name, not touching anything"
+                elif grep -qE "(^|[^A-Za-z0-9._+-])${cand}([^A-Za-z0-9._+-]|\$)" "$tpl"; then
+                    reason="'$cand' is already listed in the template but the error persists"
+                fi
+            fi
+
+            if [ -z "$reason" ]; then
+                tried="$tried$dep "
+                sed -i "s/^makedepends=\"/makedepends=\"$cand /" "$tpl"
+                if grep -q "^makedepends=\"$cand " "$tpl" && bash -n "$tpl" 2>/dev/null; then
+                    dep_fixes=$((dep_fixes + 1))
+                    say "missing '$dep' -> adding '$cand' to makedepends and rebuilding"
+                    actions="$actions [added-makedepends:$cand(for:$dep)]"
+                    continue
+                fi
+                cp "$orig" "$tpl"
+                reason="edit did not verify, template restored"
+            fi
+            rep "auto-fix NOT applied: $reason"
+        fi
+
+        # --- nothing safe left to try: fail cleanly --------------------------
+        cp "$orig" "$tpl"
+        rep "result: FAILED after $attempt attempt(s) (exit code $rc)"
+        [ -n "$actions" ] && rep "actions tried:$actions"
+        rep "template restored to its original content"
+        rep "--- error lines ---"
+        rep "$(grep -E 'ERROR|error:' "$ATTLOG.clean" | head -n 15)"
+        rep "--- last 60 log lines ---"
+        rep "$(tail -n 60 "$ATTLOG.clean")"
+        rep
+        rm -f "$orig"
+        echo "$pkg ($arch)" >> .failed
+        return 1
+    done
+}
+
+for f in "$TO_BUILD_DIR"/*; do
+    [ -f "$f" ] || continue
+    arch="${f##*/}"
+    list="$(cut -d: -f2 "$f" | uniq | tr '\n' ' ')"
+    [ -z "$list" ] && continue
+    say "building $arch packages: $list"
+    for pkg in $list; do
+        build_pkg "$arch" "$pkg"
+    done
+done
+
+say "done. failed: $(tr '\n' ',' < .failed)"
+exit 0

@@ -22,12 +22,16 @@
 #             XLOCATE=cmd overrides the xlocate binary.
 
 : "${PKGS_DIR:=./pkgs}"
-: "${MAX_NET_RETRIES:=2}"
+: "${MAX_NET_RETRIES:=3}"
 : "${MAX_DEP_FIXES:=5}"
 : "${XLOCATE:=xlocate}"
 : "${REPORT:=build-report.txt}"
 : "${TO_BUILD_DIR:=.to_build}"
 ENVFILE="${GITHUB_ENV:-/dev/null}"
+
+# on network retries, rotate through other Void mirrors (best effort: xbps-src reads XBPS_MIRROR)
+MIRRORS=("" "https://repo-fastly.voidlinux.org/current" "https://repo-de-fra.voidlinux.org/current" "")
+MIRROR=""
 
 ATTLOG="$(mktemp)"
 trap 'rm -f "$ATTLOG" "$ATTLOG.clean"' EXIT
@@ -35,6 +39,7 @@ XLOCATE_SYNCED=0
 
 : > .failed
 : > .autofixed
+: > .network_failed
 {
     echo "autobuild report"
     echo "date:   $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -51,14 +56,14 @@ run_build() { # arch pkg
     if [ -n "$BUILD_RUNNER" ]; then
         $BUILD_RUNNER "$1" "$2"
     else
-        su builder -c "cd '$GITHUB_WORKSPACE' && yes | XBPS_TARGET_ARCH=$1 EXTRA_ARGS='$EXTRA_ARGS -j$(nproc) -m masterdir-$1 -A $1' ./builder $2"
+        su builder -c "cd '$GITHUB_WORKSPACE' && yes | XBPS_TARGET_ARCH=$1 ${MIRROR:+XBPS_MIRROR=$MIRROR} EXTRA_ARGS='$EXTRA_ARGS -j$(nproc) -m masterdir-$1 -A $1' ./builder $2"
     fi
 }
 
 is_network_error() {
     # a checksum problem is never "temporary": do not retry it
     grep -qiE 'SHA256 hash is not valid|checksum' "$ATTLOG.clean" && return 1
-    grep -qiE 'could not resolve host|temporary failure in name resolution|connection timed out|connection reset|connection refused|network is unreachable|operation timed out|failed to connect|failed to download|failed to fetch|curl: \([0-9]+\)|http error 5[0-9][0-9]|unexpected eof' "$ATTLOG.clean"
+    grep -qiE 'could not resolve host|temporary failure in name resolution|connection timed out|connection reset|connection refused|network is unreachable|operation timed out|failed to connect|failed to download|failed to fetch|curl: \([0-9]+\)|http error 5[0-9][0-9]|unexpected eof|ssl_connect returned|ssl routines|tls handshake|could not connect|no route to host|name or service not known|operation not permitted.*repodata|reposync.*failed' "$ATTLOG.clean"
 }
 
 # print the dependency name from a meson "not found" error, if there is one
@@ -93,6 +98,7 @@ build_pkg() { # arch pkg
     local arch="$1" pkg="$2" tpl="$PKGS_DIR/$2/template"
     local attempt=0 net_retries=0 dep_fixes=0 actions="" rc dep cand
     local tried=" "
+    MIRROR=""
     local orig; orig="$(mktemp)"
     cp "$tpl" "$orig"
 
@@ -123,9 +129,10 @@ build_pkg() { # arch pkg
         # --- safety net 1: temporary network trouble -------------------------
         if is_network_error && [ "$net_retries" -lt "$MAX_NET_RETRIES" ]; then
             net_retries=$((net_retries + 1))
-            say "looks like a temporary network error, retry $net_retries/$MAX_NET_RETRIES"
+            MIRROR="${MIRRORS[$((net_retries % ${#MIRRORS[@]}))]}"
+            say "looks like a temporary network error, retry $net_retries/$MAX_NET_RETRIES (mirror: ${MIRROR:-default})"
             actions="$actions [network-retry#$net_retries]"
-            sleep "${RETRY_SLEEP:-20}"
+            sleep $(( ${RETRY_SLEEP:-30} * net_retries ))
             continue
         fi
 
@@ -177,6 +184,10 @@ build_pkg() { # arch pkg
 
         # --- nothing safe left to try: fail cleanly --------------------------
         cp "$orig" "$tpl"
+        if is_network_error; then
+            echo "$pkg ($arch)" >> .network_failed
+            rep "note: the last error still looks like a network problem; the workflow will retry the whole run later"
+        fi
         rep "result: FAILED after $attempt attempt(s) (exit code $rc)"
         [ -n "$actions" ] && rep "actions tried:$actions"
         rep "template restored to its original content"

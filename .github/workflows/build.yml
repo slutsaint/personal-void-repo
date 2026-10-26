@@ -1,6 +1,11 @@
 name: build
 on:
   workflow_dispatch:
+    inputs:
+      attempt:
+        description: "internal retry counter (leave as 1)"
+        required: false
+        default: "1"
   push:
     branches: [main]
     paths: ['pkgs/**', 'common/**', 'builder', 'sign', 'autobuild', '.github/workflows/build.yml']
@@ -25,14 +30,39 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
+    outputs:
+      pkg_failed: ${{ steps.result.outputs.pkg_failed }}
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
       options: --privileged
     steps:
-      - name: install tools
+      - name: install tools (retries, falls back to other Void mirrors)
         run: |
-          xbps-install -Syu || xbps-install -Syu
-          xbps-install -Sy git curl bash xtools util-linux jq nodejs github-cli openssl xbps
+          set +e
+          ok=0
+          for i in 1 2 3 4 5; do
+            if xbps-install -Syu || xbps-install -Syu; then ok=1; break; fi
+            echo "::warning::xbps update failed (attempt $i of 5)"
+            case $i in
+              2) m=https://repo-fastly.voidlinux.org/current ;;
+              3) m=https://repo-de-fra.voidlinux.org/current ;;
+              4) m=https://repo-fastly.voidlinux.org/current ;;
+              *) m= ;;
+            esac
+            if [ -n "$m" ]; then
+              mkdir -p /etc/xbps.d
+              echo "repository=$m" > /etc/xbps.d/00-repository-main.conf
+              echo "now using mirror $m"
+            fi
+            sleep $((i * 20))
+          done
+          [ "$ok" = 1 ] || { echo "xbps update failed 5 times, giving up"; exit 1; }
+          ok=0
+          for i in 1 2 3; do
+            if xbps-install -Sy git curl bash xtools util-linux jq nodejs github-cli openssl xbps; then ok=1; break; fi
+            sleep $((i * 20))
+          done
+          [ "$ok" = 1 ] || { echo "tool install failed 3 times, giving up"; exit 1; }
           useradd -M builder
           git config --global --add safe.directory '*'
 
@@ -105,6 +135,16 @@ jobs:
           cp build-report.txt last-build.log
           gh release upload "$RELEASE_TAG" last-build.log --clobber
 
+      - name: record whether a package itself failed
+        id: result
+        if: always()
+        run: |
+          # pkg_failed=true means "a package really failed to build" (do NOT retry the run).
+          # Network-caused failures are left unset, so the retry job below can try again.
+          if [ -s .failed ] && [ ! -s .network_failed ]; then
+            echo "pkg_failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: fail the run if any package could not be built
         if: env.TO_BUILD != ''
         run: |
@@ -113,3 +153,26 @@ jobs:
             cat .failed
             exit 1
           fi
+
+  retry:
+    # If the run failed for infrastructure reasons (mirror down, network), try again
+    # later: at most 3 runs in total. Real package failures are NOT retried.
+    needs: build
+    if: always() && needs.build.result == 'failure' && needs.build.outputs.pkg_failed != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: dispatch another attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ github.event.inputs.attempt || '1' }}
+        run: |
+          if [ "$ATTEMPT" -ge 3 ]; then
+            echo "attempt $ATTEMPT was the last allowed one, giving up"
+            exit 0
+          fi
+          echo "attempt $ATTEMPT failed for infrastructure reasons; waiting 10 minutes"
+          sleep 600
+          gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f attempt="$((ATTEMPT + 1))"

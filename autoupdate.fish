@@ -15,7 +15,7 @@ function get_github_newest_tag_version -a repo pattern
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accepts: application/github+json" \
             https://api.github.com/repos/$repo/tags -s | 
-        jq -sr --arg pattern "$pattern" '.[] | map(.name) | map(select(test($pattern))) | sort | reverse | first | match($pattern).captures | first | .string'
+        jq -sr --arg pattern "$pattern" '.[] | map(.name) | map(select(test($pattern))) | sort_by(match($pattern).captures | first | .string | split(".") | map(tonumber)) | reverse | first | match($pattern).captures | first | .string'
 end
 
 function get_github_newest_commit_at_midnight -a repo branch
@@ -59,6 +59,7 @@ function check_github_tagged_updates -a repo pkg_name pattern
     set digest $(get_digest $dist_files)
     sed -i "s/version=.*/version=$latest_version/" ./pkgs/$pkg_name/template
     sed -i "s/checksum=.*/checksum=\"$digest\"/" ./pkgs/$pkg_name/template
+    sed -i "s/^revision=.*/revision=1/" ./pkgs/$pkg_name/template
     set -a updates "$pkg_name=$latest_version"
 end
 
@@ -111,6 +112,7 @@ end
 
 check_github_tagged_updates noctalia-dev/noctalia noctalia '^v([0-9]+\.[0-9]+\.[0-9]+)$'
 check_github_tagged_updates noctalia-dev/noctalia-greeter noctalia-greeter '^v([0-9]+\.[0-9]+\.[0-9]+)$'
+check_github_tagged_updates pankaspe/nordend-fm nordend '^v([0-9]+\.[0-9]+\.[0-9]+)$'
 
 if test -n "$updates"
     set output_lines "updates<<STRING" $updates "STRING"

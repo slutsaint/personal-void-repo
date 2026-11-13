@@ -13,5 +13,6 @@ sudo xbps-install -S
 |---|---|
 | noctalia | noctalia-dev/noctalia |
 | noctalia-greeter | noctalia-dev/noctalia-greeter |
+| nordend | pankaspe/nordend-fm |
 
 New upstream releases are built automatically and are UNTESTED.

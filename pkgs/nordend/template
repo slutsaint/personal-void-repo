@@ -4,10 +4,10 @@
 pkgname=nordend
 version=0.6.2
 revision=1
+archs="x86_64"
 build_style=cmake
 # NORDEND_WERROR: a newer compiler's new warning must not break the package
 configure_args="-DNORDEND_BUILD_TESTS=OFF -DNORDEND_WERROR=OFF"
-archs="x86_64"
 hostmakedepends="pkgconf wayland-devel"
 makedepends="wayland-devel wayland-protocols libglvnd-devel libxkbcommon-devel
  harfbuzz-devel freetype-devel fontconfig-devel tomlplusplus-devel

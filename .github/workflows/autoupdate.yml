@@ -1,7 +1,11 @@
 name: autoupdate
 on:
   schedule:
-    - cron: '5 * * * *'   # hourly; change to '5 */6 * * *' for every 6h
+    # GitHub delays or drops scheduled runs, worst at the start of the hour, so
+    # two off-peak minutes. This is the backup; an external pinger can also
+    # start this workflow through workflow_dispatch below.
+    - cron: '17 * * * *'
+    - cron: '47 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -41,3 +45,8 @@ jobs:
           git push
           # pushes made with GITHUB_TOKEN don't start other workflows, so start the build explicitly
           gh workflow run build.yml --ref "${GITHUB_REF_NAME}"
+      - name: fail the run if an upstream check failed
+        if: ${{ steps.updates.outputs.failed == '1' }}
+        run: |
+          echo "::error::an upstream version check failed, see the 'check upstream for new versions' step"
+          exit 1

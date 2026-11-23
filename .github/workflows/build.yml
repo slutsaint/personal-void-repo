@@ -6,6 +6,10 @@ on:
         description: "internal retry counter (leave as 1)"
         required: false
         default: "1"
+      reindex:
+        description: "re-sign and republish the index without building (true/false)"
+        required: false
+        default: "false"
   push:
     branches: [main]
     paths: ['pkgs/**', 'common/**', 'builder', 'sign', 'autobuild', '.github/workflows/build.yml']
@@ -103,7 +107,7 @@ jobs:
           bash ./autobuild
 
       - name: sign and index
-        if: env.BUILT_ANY == 'true'
+        if: env.BUILT_ANY == 'true' || github.event.inputs.reindex == 'true'
         env:
           SIGN_KEY_B64: ${{ secrets.SIGN_KEY }}
         run: |
@@ -112,7 +116,7 @@ jobs:
           rm -f /tmp/key.pem
 
       - name: publish
-        if: env.BUILT_ANY == 'true'
+        if: env.BUILT_ANY == 'true' || github.event.inputs.reindex == 'true'
         run: |
           cd repo/binpkgs
           gh release upload "$RELEASE_TAG" ./*.xbps ./*.sig2 ./*-repodata --clobber

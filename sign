@@ -28,7 +28,7 @@ if [ -n "$repodatas" ]; then
 fi
 
 info "Reindexing $binpkgs..."
-xbps-rindex --force -a -v "$binpkgs"/*.xbps
+xbps-rindex -a -v "$binpkgs"/*.xbps
 
 info "Signing $binpkgs..."
 xbps-rindex --privkey "$SIGN_KEY" --signedby "$SIGNED_BY" --sign "$binpkgs"

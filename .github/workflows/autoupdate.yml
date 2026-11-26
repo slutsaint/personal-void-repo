@@ -2,15 +2,15 @@ name: autoupdate
 on:
   schedule:
     # GitHub delays or drops scheduled runs, worst at the start of the hour, so
-    # two off-peak minutes. This is the backup; an external pinger can also
-    # start this workflow through workflow_dispatch below.
+    # two off-peak minutes. An external pinger can also use workflow_dispatch.
     - cron: '17 * * * *'
     - cron: '47 * * * *'
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: write
+  contents: write   # push version bumps + keepalive commit
+  actions: write    # start build.yml
+  issues: write     # open/close the "autoupdate is failing" issue
 
 concurrency:
   group: autoupdate
@@ -19,19 +19,29 @@ concurrency:
 jobs:
   autoupdate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: keep schedule alive (resets the 60-day timer)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: if [ "$(date +%u-%H)" = "1-03" ]; then gh workflow enable autoupdate.yml; fi
-      - name: install tools
-        run: sudo apt-get update && sudo apt-get install -y fish jq
+
+      # GitHub disables scheduled workflows in a public repo after 60 days without a
+      # COMMIT (workflow runs, enabling the workflow and releases do not count, and a
+      # disabled workflow cannot re-enable itself). So make a real, empty commit when the
+      # last one is getting old.
+      - name: keepalive commit (prevents the 60-day schedule shutdown)
+        run: |
+          age_days=$(( ($(date +%s) - $(git log -1 --format=%ct)) / 86400 ))
+          echo "last commit is $age_days days old"
+          if [ "$age_days" -ge 45 ]; then
+            git config user.name "repo-bot"
+            git config user.email "repo-bot@users.noreply.github.com"
+            git commit --allow-empty -m "[automated] keepalive (last commit was $age_days days ago)"
+            git push
+          fi
+
       - name: check upstream for new versions
         id: updates
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: ./autoupdate.fish
+        run: ./autoupdate.sh
+
       - name: commit and trigger build
         if: ${{ steps.updates.outputs.updates != '' }}
         env:
@@ -41,12 +51,43 @@ jobs:
           git config user.name "repo-bot"
           git config user.email "repo-bot@users.noreply.github.com"
           git add -A pkgs common
+          if git diff --cached --quiet; then
+            echo "templates unchanged, nothing to commit"
+            exit 0
+          fi
           git commit -m "[automated] update packages" -m "$UPDATES"
-          git push
+          # build.yml pushes to main too (auto-fix commits), so rebase and retry
+          for i in 1 2 3 4; do
+            git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME" && break
+            [ "$i" = 4 ] && { echo "::error::could not push after 4 attempts"; exit 1; }
+            sleep $((i * 5))
+          done
           # pushes made with GITHUB_TOKEN don't start other workflows, so start the build explicitly
-          gh workflow run build.yml --ref "${GITHUB_REF_NAME}"
-      - name: fail the run if an upstream check failed
-        if: ${{ steps.updates.outputs.failed == '1' }}
-        run: |
-          echo "::error::an upstream version check failed, see the 'check upstream for new versions' step"
+          for i in 1 2 3; do
+            gh workflow run build.yml --ref "$GITHUB_REF_NAME" && exit 0
+            sleep $((i * 5))
+          done
+          echo "::error::could not start build.yml (it also has a schedule, so it will catch up)"
           exit 1
+
+      # Run stays green for per-package problems; you get ONE issue (= one email) instead
+      # of a wall of red runs, and it closes itself when the problem is gone.
+      - name: report problems
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILURES: ${{ steps.updates.outputs.failures }}
+          CHECK_RAN: ${{ steps.updates.conclusion }}
+        run: |
+          [ "$CHECK_RAN" = "success" ] || FAILURES="the autoupdate script itself crashed, see the run log"
+          open=$(gh issue list --label autoupdate-failing --state open --json number --jq '.[0].number // empty')
+          if [ -n "$FAILURES" ]; then
+            if [ -z "$open" ]; then
+              gh label create autoupdate-failing --color B60205 --description "autoupdate workflow has a problem" 2>/dev/null || true
+              gh issue create --label autoupdate-failing \
+                --title "autoupdate: upstream check problem" \
+                --body "$(printf 'Run: %s/%s/actions/runs/%s\n\n```\n%s\n```\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$FAILURES")"
+            fi
+          elif [ -n "$open" ]; then
+            gh issue close "$open" --comment "Recovered: last run checked everything without problems."
+          fi

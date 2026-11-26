@@ -2,7 +2,7 @@
 # Nordend's xbps-src template for Void Linux. Copy this folder into a
 # void-packages checkout as srcpkgs/nordend, then: ./xbps-src pkg nordend
 pkgname=nordend
-version=0.10.0
+version=0.10.1
 revision=1
 archs="x86_64"
 build_style=cmake
@@ -20,7 +20,7 @@ maintainer="slut saint <manthan2007matrick@gmail.com>"
 license="MIT"
 homepage="https://github.com/pankaspe/nordend-fm"
 distfiles="https://github.com/pankaspe/nordend-fm/archive/v${version}.tar.gz"
-checksum="14e1cf39bcc876c2dcf1f2442f61efbf6cf3fb7d6217208f29f4615865ee0dc9"
+checksum="6f1a1663635fb944c3ee488fa569b0684323362072c7a1d13314c7b8cc1f2d84"
 
 post_install() {
 	vlicense LICENSE
